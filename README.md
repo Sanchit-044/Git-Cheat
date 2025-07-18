@@ -2,7 +2,6 @@
 
 A powerful tool for transferring Git repositories while rewriting commit history and modifying commit messages.
 
-![Git-Cheat Banner](https://repository-images.githubusercontent.com/372789422/59a5a9a8-c0a9-47c1-b27d-23e5d97efdb0)
 
 ## Features
 
@@ -22,7 +21,7 @@ A powerful tool for transferring Git repositories while rewriting commit history
 
 1. Clone this repository:
    ```bash
-   git clone https://github.com/anaskhan54/Git-Cheat.git
+   git clone https://github.com/Pudv95/Git-Cheat.git
    cd Git-Cheat
    ```
 

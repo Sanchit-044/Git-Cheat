@@ -3,6 +3,9 @@ import subprocess
 import shutil
 import re
 import logging
+import random
+import time
+from datetime import datetime, timedelta
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 
@@ -66,11 +69,42 @@ def extract_repo_name(url):
         return github_match.group(1)
         
     logging.error(f"Could not extract repository name from URL: {url}")
-    return None  # Return None instead of exiting
+    return None
 
-def transfer_repo(old_repo_url, new_repo_url, new_author_name, new_author_email, replace_in_messages=False, replacements=None):
-    """Transfers all branches from the old repo to the new repo with updated authorship."""
-    # Initialize bare_repo to avoid UnboundLocalError
+def generate_random_date_range(start_date, end_date, num_commits):
+    """Generate a list of random dates within the specified range."""
+    start = datetime.strptime(start_date, "%Y-%m-%d")
+    end = datetime.strptime(end_date, "%Y-%m-%d")
+    
+    if start >= end:
+        logging.error("Start date must be before end date")
+        return []
+    
+    # Generate random dates
+    dates = []
+    time_diff = end - start
+    for _ in range(num_commits):
+        random_days = random.randint(0, time_diff.days)
+        random_seconds = random.randint(0, 86400)  # Random time within the day
+        random_date = start + timedelta(days=random_days, seconds=random_seconds)
+        dates.append(random_date)
+    
+    # Sort dates to maintain chronological order
+    dates.sort()
+    return dates
+
+def get_commit_count(repo_path):
+    """Get the total number of commits in the repository."""
+    try:
+        result = run_command("git rev-list --count --all", exit_on_error=False)
+        return int(result) if result else 0
+    except:
+        return 0
+
+def transfer_repo(old_repo_url, new_repo_url, new_author_name, new_author_email, 
+                 replace_in_messages=False, replacements=None, modify_dates=False, 
+                 start_date=None, end_date=None):
+    """Transfers all branches from the old repo to the new repo with updated authorship and optionally modified dates."""
     bare_repo = None
     
     try:
@@ -91,30 +125,50 @@ def transfer_repo(old_repo_url, new_repo_url, new_author_name, new_author_email,
 
         ensure_git_filter_repo()
 
-        logging.info("Rewriting commit authorship...")
+        # Get commit count for date generation
+        commit_count = get_commit_count(".")
+        
+        # Step 1: Update author info and messages
+        logging.info("Updating author information...")
+        callback_parts = []
+        callback_parts.append(f"commit.author_name = commit.committer_name = b'{new_author_name}'")
+        callback_parts.append(f"commit.author_email = commit.committer_email = b'{new_author_email}'")
+        
         if replace_in_messages and replacements:
-            # Modify both author and commit messages
-            replacements_code = ""
+            callback_parts.append("message = commit.message.decode('utf-8', errors='replace')")
             for old_text, new_text in replacements.items():
-                # Escape single quotes in old_text and new_text to avoid breaking the command
                 old_text_escaped = old_text.replace("'", "\\'")
                 new_text_escaped = new_text.replace("'", "\\'")
-                replacements_code += f"message = message.replace('{old_text_escaped}', '{new_text_escaped}');"
-                
-            callback = f'''
-commit.author_name = commit.committer_name = b\'{new_author_name}\'; 
-commit.author_email = commit.committer_email = b\'{new_author_email}\';
-message = commit.message.decode('utf-8', errors='replace');
-{replacements_code}
-commit.message = message.encode('utf-8');
-'''
-            # Remove newlines for command execution
-            callback = callback.replace('\n', ' ')
-            # Use preserve-timestamps option instead
-            run_command(f'git-filter-repo --commit-callback "{callback}" --force')
-        else:
-            # Only modify author information
-            run_command(f'git-filter-repo --commit-callback "commit.author_name = commit.committer_name = b\'{new_author_name}\'; commit.author_email = commit.committer_email = b\'{new_author_email}\'" --force')
+                callback_parts.append(f"message = message.replace('{old_text_escaped}', '{new_text_escaped}')")
+            callback_parts.append("commit.message = message.encode('utf-8')")
+        
+        callback = '; '.join(callback_parts)
+        run_command(f'git-filter-repo --commit-callback "{callback}" --force')
+        
+        # Step 2: Modify dates if requested
+        if modify_dates and start_date and end_date:
+            logging.info(f"Modifying commit dates to random dates between {start_date} and {end_date}...")
+            
+            # Generate random dates
+            random_dates = generate_random_date_range(start_date, end_date, commit_count)
+            
+            # Get list of all commits
+            commits = run_command("git log --all --format='%H' --reverse").split('\n')
+            commits = [c for c in commits if c.strip()]
+            
+            # Create environment filter script
+            env_filter = 'case $GIT_COMMIT in\n'
+            
+            for i, commit in enumerate(commits):
+                if i < len(random_dates):
+                    timestamp = int(random_dates[i].timestamp())
+                    env_filter += f'    {commit}) export GIT_AUTHOR_DATE="{timestamp}"; export GIT_COMMITTER_DATE="{timestamp}";;\n'
+            
+            env_filter += '    *) ;;\nesac'
+            
+            run_command(f'git filter-branch --env-filter \'{env_filter}\' --force -- --all')
+            
+            run_command('git for-each-ref --format="%(refname)" refs/original/ | xargs -n 1 git update-ref -d', exit_on_error=False)
 
         logging.info("Adding new repository remote...")
         run_command(f"git remote add new-origin {new_repo_url}")
@@ -141,10 +195,29 @@ if __name__ == "__main__":
      | |_| |  | |    | |   |_____| | |___  |  _  | | |___   / ___ \    | |  
       \____| |___|   |_|            \____| |_| |_| |_____| /_/   \_\   |_|  
     """ )
+    
     old_repo_url = input("Enter the URL of the old repository: ").strip()
     new_repo_url = input("Enter the URL of the new repository: ").strip()
     new_author_name = input("Enter the new author's name: ").strip()
     new_author_email = input("Enter the new author's email: ").strip()
+    
+    # Ask about date modification
+    modify_dates = input("Do you want to modify commit dates? (yes/no): ").strip().lower() in ["yes", "y"]
+    start_date = None
+    end_date = None
+    
+    if modify_dates:
+        print("\nEnter the date range for randomizing commit dates:")
+        start_date = input("Enter start date (YYYY-MM-DD): ").strip()
+        end_date = input("Enter end date (YYYY-MM-DD): ").strip()
+        
+        # Validate date format
+        try:
+            datetime.strptime(start_date, "%Y-%m-%d")
+            datetime.strptime(end_date, "%Y-%m-%d")
+        except ValueError:
+            logging.error("Invalid date format. Please use YYYY-MM-DD format.")
+            exit(1)
     
     replacements = {}
     while True:
@@ -157,8 +230,22 @@ if __name__ == "__main__":
         else:
             break
     
+    print("\n" + "="*50)
+    print("TRANSFER SUMMARY:")
+    print(f"Old repository: {old_repo_url}")
+    print(f"New repository: {new_repo_url}")
+    print(f"New author: {new_author_name} <{new_author_email}>")
+    if modify_dates:
+        print(f"Date range: {start_date} to {end_date}")
     if replacements:
-        print(f"Applying {len(replacements)} text replacements in commit messages...")
-        transfer_repo(old_repo_url, new_repo_url, new_author_name, new_author_email, True, replacements)
-    else:
-        transfer_repo(old_repo_url, new_repo_url, new_author_name, new_author_email)
+        print(f"Message replacements: {len(replacements)} replacement(s)")
+    print("="*50)
+    
+    confirm = input("Proceed with transfer? (yes/no): ").strip().lower()
+    if confirm not in ["yes", "y"]:
+        print("Transfer cancelled.")
+        exit(0)
+    
+    # Execute transfer
+    transfer_repo(old_repo_url, new_repo_url, new_author_name, new_author_email, 
+                 bool(replacements), replacements, modify_dates, start_date, end_date)
